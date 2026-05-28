@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio Tag Editor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: monospace; font-size: 14px; padding: 24px; max-width: 640px; }
+  h1 { font-size: 18px; margin-bottom: 20px; }
+  h2 { font-size: 14px; margin: 20px 0 10px; }
+  label { display: block; margin-bottom: 4px; }
+  input[type="text"], input[type="number"] {
+    width: 100%; padding: 6px 8px; font-family: monospace; font-size: 14px;
+    border: 1px solid #999; background: #fff; display: block; margin-bottom: 12px;
+  }
+  input[type="file"] { display: block; margin-bottom: 12px; }
+  button {
+    font-family: monospace; font-size: 14px; padding: 6px 14px;
+    border: 1px solid #999; background: #fff; cursor: pointer;
+  }
+  button:hover { background: #eee; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #cover-preview { display: block; max-width: 160px; margin: 8px 0; border: 1px solid #ccc; }
+  #status { margin-top: 16px; font-style: italic; color: #555; min-height: 20px; }
+  #drop-zone {
+    border: 2px dashed #aaa; padding: 32px; text-align: center;
+    margin-bottom: 20px; cursor: pointer;
+  }
+  #drop-zone.drag-over { background: #f5f5f5; border-color: #333; }
+  #editor { display: none; }
+  hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
+  #cover-remove { margin-left: 8px; }
+</style>
+</head>
+<body>
+
+<h1>audio tag editor</h1>
+
+<div id="drop-zone">
+  <div>drop an audio file here</div>
+  <div style="margin-top:8px; color:#888; font-size:12px;">or click to browse — mp3, flac, ogg, m4a</div>
+  <input type="file" id="file-input" accept="audio/*" style="display:none">
+</div>
+
+<div id="editor">
+  <div id="file-info" style="margin-bottom:16px; color:#555;"></div>
+  <hr>
+
+  <h2>track info</h2>
+  <label>title</label>
+  <input type="text" id="tag-title">
+  <label>artist</label>
+  <input type="text" id="tag-artist">
+  <label>album artist</label>
+  <input type="text" id="tag-album-artist">
+  <label>album</label>
+  <input type="text" id="tag-album">
+  <label>year</label>
+  <input type="number" id="tag-year" min="1900" max="2099">
+  <label>track number</label>
+  <input type="text" id="tag-track" placeholder="e.g. 1 or 1/12">
+  <label>disc number</label>
+  <input type="text" id="tag-disc" placeholder="e.g. 1 or 1/2">
+  <label>genre</label>
+  <input type="text" id="tag-genre">
+  <label>composer</label>
+  <input type="text" id="tag-composer">
+  <label>comment</label>
+  <input type="text" id="tag-comment">
+
+  <h2>cover art</h2>
+  <img id="cover-preview" style="display:none">
+  <label for="cover-input">replace cover image (jpg/png)</label>
+  <input type="file" id="cover-input" accept="image/jpeg,image/png">
+  <button id="cover-remove" style="display:none">remove cover</button>
+
+  <hr>
+  <button id="download-btn">download with new tags</button>
+  <div id="status"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.7/jsmediatags.min.js"></script>
+<script>
+// ── state ──────────────────────────────────────────────────────────────────
+let originalFile = null;
+let originalArrayBuffer = null;
+let newCoverData = null;   // {data: Uint8Array, type: string} | null
+let removeCover = false;
+let existingCover = null;  // {data, type} from original tags
+
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const editor = document.getElementById('editor');
+const status = document.getElementById('status');
+const coverPreview = document.getElementById('cover-preview');
+const coverInput = document.getElementById('cover-input');
+const coverRemoveBtn = document.getElementById('cover-remove');
+
+// ── drop zone ──────────────────────────────────────────────────────────────
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) loadFile(fileInput.files[0]); });
+
+// ── load file & read tags ──────────────────────────────────────────────────
+function loadFile(file) {
+  originalFile = file;
+  newCoverData = null;
+  removeCover = false;
+  existingCover = null;
+  status.textContent = '';
+
+  const ext = file.name.split('.').pop().toLowerCase();
+  document.getElementById('file-info').textContent = `${file.name}  (${(file.size/1024/1024).toFixed(2)} MB)`;
+
+  // Read into ArrayBuffer for later rewriting
+  const abReader = new FileReader();
+  abReader.onload = e => { originalArrayBuffer = e.target.result; };
+  abReader.readAsArrayBuffer(file);
+
+  // Clear fields
+  ['title','artist','album-artist','album','year','track','disc','genre','composer','comment'].forEach(id => {
+    document.getElementById('tag-' + id).value = '';
+  });
+  coverPreview.style.display = 'none';
+  coverRemoveBtn.style.display = 'none';
+  coverInput.value = '';
+
+  if (['mp3','flac','ogg','m4a','mp4','aac'].includes(ext)) {
+    jsmediatags.read(file, {
+      onSuccess: tag => {
+        const t = tag.tags;
+        setValue('tag-title', t.title);
+        setValue('tag-artist', t.artist);
+        setValue('tag-album', t.album);
+        setValue('tag-year', t.year);
+        setValue('tag-genre', t.genre);
+        setValue('tag-comment', t.comment?.text ?? t.comment);
+        setValue('tag-composer', t.composer);
+        // track / disc
+        setValue('tag-track', t.track ?? (t.TRCK?.data ?? ''));
+        setValue('tag-disc', t.partOfSet ?? (t.TPOS?.data ?? ''));
+        setValue('tag-album-artist', t.album_artist ?? (t.TPE2?.data ?? ''));
+
+        // cover
+        const pic = t.picture ?? t.APIC?.data;
+        if (pic) {
+          existingCover = { data: pic.data, type: pic.format || 'image/jpeg' };
+          showCoverFromBytes(pic.data, pic.format);
+        }
+        editor.style.display = 'block';
+        dropZone.style.display = 'none';
+      },
+      onError: () => {
+        // still let them edit even if tags can't be read
+        editor.style.display = 'block';
+        dropZone.style.display = 'none';
+        status.textContent = 'could not read existing tags — fields left blank.';
+      }
+    });
+  } else {
+    editor.style.display = 'block';
+    dropZone.style.display = 'none';
+  }
+}
+
+function setValue(id, val) {
+  const el = document.getElementById(id);
+  if (el && val != null) el.value = val;
+}
+
+function showCoverFromBytes(byteArray, mimeType) {
+  const blob = new Blob([new Uint8Array(byteArray)], { type: mimeType || 'image/jpeg' });
+  coverPreview.src = URL.createObjectURL(blob);
+  coverPreview.style.display = 'block';
+  coverRemoveBtn.style.display = 'inline-block';
+}
+
+// ── cover image change ─────────────────────────────────────────────────────
+coverInput.addEventListener('change', async () => {
+  const f = coverInput.files[0];
+  if (!f) return;
+  removeCover = false;
+  const ab = await f.arrayBuffer();
+  newCoverData = { data: new Uint8Array(ab), type: f.type };
+  coverPreview.src = URL.createObjectURL(f);
+  coverPreview.style.display = 'block';
+  coverRemoveBtn.style.display = 'inline-block';
+});
+
+coverRemoveBtn.addEventListener('click', () => {
+  removeCover = true;
+  newCoverData = null;
+  existingCover = null;
+  coverPreview.style.display = 'none';
+  coverRemoveBtn.style.display = 'none';
+  coverInput.value = '';
+});
+
+// ── write ID3v2 & download ─────────────────────────────────────────────────
+document.getElementById('download-btn').addEventListener('click', async () => {
+  if (!originalFile || !originalArrayBuffer) return;
+  status.textContent = 'writing tags…';
+  const ext = originalFile.name.split('.').pop().toLowerCase();
+
+  try {
+    if (ext === 'mp3') {
+      await writeMp3();
+    } else if (ext === 'flac') {
+      await writeFlac();
+    } else {
+      // For other formats, we can only do a best-effort ID3 prepend (not ideal)
+      // but most players will use ID3 block if present
+      await writeMp3(); // treat as id3-capable
+    }
+  } catch(err) {
+    status.textContent = 'error: ' + err.message;
+    console.error(err);
+  }
+});
+
+// ── MP3: write ID3v2 from scratch ──────────────────────────────────────────
+async function writeMp3() {
+  // Strip existing ID3 tags from the original buffer, then prepend new one
+  const srcBytes = new Uint8Array(originalArrayBuffer);
+  const audioStart = findAudioStart(srcBytes);
+  const audioBytes = srcBytes.slice(audioStart);
+
+  const id3 = buildID3v2();
+  const out = new Uint8Array(id3.length + audioBytes.length);
+  out.set(id3, 0);
+  out.set(audioBytes, id3.length);
+
+  downloadBlob(new Blob([out], { type: 'audio/mpeg' }), originalFile.name);
+  status.textContent = 'done!';
+}
+
+function findAudioStart(bytes) {
+  // Skip ID3v2 tag if present
+  if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    const size = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) |
+                 ((bytes[8] & 0x7f) << 7)  |  (bytes[9] & 0x7f);
+    return 10 + size;
+  }
+  // Skip ID3v1 tag at end (handled naturally), just return 0
+  return 0;
+}
+
+function buildID3v2() {
+  const frames = [];
+
+  const addText = (id, val) => {
+    if (val) frames.push(makeTextFrame(id, val));
+  };
+
+  addText('TIT2', document.getElementById('tag-title').value);
+  addText('TPE1', document.getElementById('tag-artist').value);
+  addText('TPE2', document.getElementById('tag-album-artist').value);
+  addText('TALB', document.getElementById('tag-album').value);
+  addText('TYER', document.getElementById('tag-year').value);
+  addText('TRCK', document.getElementById('tag-track').value);
+  addText('TPOS', document.getElementById('tag-disc').value);
+  addText('TCON', document.getElementById('tag-genre').value);
+  addText('TCOM', document.getElementById('tag-composer').value);
+
+  const comment = document.getElementById('tag-comment').value;
+  if (comment) frames.push(makeCommentFrame(comment));
+
+  // Cover
+  const cover = newCoverData ?? (!removeCover ? existingCover : null);
+  if (cover) frames.push(makeAPICFrame(cover.data, cover.type));
+
+  // Measure total frame size
+  const framesSize = frames.reduce((s, f) => s + f.length, 0);
+  const header = new Uint8Array(10);
+  header[0] = 0x49; header[1] = 0x44; header[2] = 0x33; // 'ID3'
+  header[3] = 0x03; header[4] = 0x00; // version 2.3.0
+  header[5] = 0x00; // flags
+  // Encode size as 4 syncsafe integers
+  const sz = framesSize;
+  header[6] = (sz >> 21) & 0x7f;
+  header[7] = (sz >> 14) & 0x7f;
+  header[8] = (sz >> 7)  & 0x7f;
+  header[9] = sz & 0x7f;
+
+  const out = new Uint8Array(10 + framesSize);
+  out.set(header, 0);
+  let offset = 10;
+  for (const f of frames) { out.set(f, offset); offset += f.length; }
+  return out;
+}
+
+function encodeUTF16LE(str) {
+  const buf = new Uint8Array(2 + str.length * 2);
+  buf[0] = 0xff; buf[1] = 0xfe; // BOM
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    buf[2 + i * 2]     = c & 0xff;
+    buf[2 + i * 2 + 1] = (c >> 8) & 0xff;
+  }
+  return buf;
+}
+
+function makeTextFrame(id, value) {
+  const encoded = encodeUTF16LE(value);
+  // frame header: 4 id bytes, 4 size bytes, 2 flag bytes, 1 encoding byte, data
+  const size = 1 + encoded.length; // encoding byte + text bytes
+  const frame = new Uint8Array(10 + size);
+  for (let i = 0; i < 4; i++) frame[i] = id.charCodeAt(i);
+  frame[4] = (size >> 24) & 0xff;
+  frame[5] = (size >> 16) & 0xff;
+  frame[6] = (size >> 8)  & 0xff;
+  frame[7] = size & 0xff;
+  // flags = 0x00 0x00
+  frame[10] = 0x01; // encoding = UTF-16
+  frame.set(encoded, 11);
+  return frame;
+}
+
+function makeCommentFrame(text) {
+  // COMM frame: encoding(1) + language(3) + short desc(1, null) + text
+  const encoded = encodeUTF16LE(text);
+  const size = 1 + 3 + 2 + encoded.length; // enc + lang + BOM null terminator + text
+  const frame = new Uint8Array(10 + size);
+  frame[0]=0x43;frame[1]=0x4f;frame[2]=0x4d;frame[3]=0x4d; // COMM
+  frame[4] = (size >> 24) & 0xff;
+  frame[5] = (size >> 16) & 0xff;
+  frame[6] = (size >> 8)  & 0xff;
+  frame[7] = size & 0xff;
+  frame[10] = 0x01; // UTF-16
+  frame[11] = 0x65; frame[12] = 0x6e; frame[13] = 0x67; // 'eng'
+  frame[14] = 0x00; frame[15] = 0x00; // empty short desc (UTF-16 null)
+  frame.set(encoded, 16);
+  return frame;
+}
+
+function makeAPICFrame(imgData, mimeType) {
+  const mime = mimeType || 'image/jpeg';
+  const mimeBytes = new TextEncoder().encode(mime);
+  // encoding(1) + mime + null(1) + pictype(1) + desc null(1) + imgdata
+  const size = 1 + mimeBytes.length + 1 + 1 + 1 + imgData.length;
+  const frame = new Uint8Array(10 + size);
+  frame[0]=0x41;frame[1]=0x50;frame[2]=0x49;frame[3]=0x43; // APIC
+  frame[4] = (size >> 24) & 0xff;
+  frame[5] = (size >> 16) & 0xff;
+  frame[6] = (size >> 8)  & 0xff;
+  frame[7] = size & 0xff;
+  frame[10] = 0x00; // encoding = Latin-1 (for mime)
+  frame.set(mimeBytes, 11);
+  let off = 11 + mimeBytes.length;
+  frame[off++] = 0x00; // null terminator for mime
+  frame[off++] = 0x03; // picture type: cover (front)
+  frame[off++] = 0x00; // empty description
+  frame.set(imgData, off);
+  return frame;
+}
+
+// ── FLAC: rewrite Vorbis comment block ────────────────────────────────────
+async function writeFlac() {
+  const src = new Uint8Array(originalArrayBuffer);
+
+  // Verify fLaC marker
+  if (src[0] !== 0x66 || src[1] !== 0x4c || src[2] !== 0x61 || src[3] !== 0x43) {
+    // Not actually FLAC, fall back to mp3 id3 write
+    await writeMp3();
+    return;
+  }
+
+  // Parse metadata blocks
+  const blocks = [];
+  let pos = 4;
+  while (pos < src.length) {
+    const blockHeader = src[pos];
+    const isLast = (blockHeader & 0x80) !== 0;
+    const blockType = blockHeader & 0x7f;
+    const blockSize = (src[pos+1] << 16) | (src[pos+2] << 8) | src[pos+3];
+    blocks.push({ type: blockType, isLast, data: src.slice(pos+4, pos+4+blockSize), offset: pos });
+    pos += 4 + blockSize;
+    if (isLast) break;
+  }
+
+  const audioData = src.slice(pos);
+
+  // Build new Vorbis comment block (type 4)
+  const vcBlock = buildVorbisComment();
+  // Build new PICTURE block (type 6) if needed
+  const cover = newCoverData ?? (!removeCover ? existingCover : null);
+  const picBlock = cover ? buildFlacPicture(cover.data, cover.type) : null;
+
+  // Reassemble: keep STREAMINFO (type 0), skip old VORBIS_COMMENT (4) and PICTURE (6), add new ones
+  const newBlocks = [];
+  for (const b of blocks) {
+    if (b.type === 0) newBlocks.push({ type: 0, data: b.data }); // STREAMINFO always first
+    else if (b.type === 4 || b.type === 6) { /* skip, we'll add fresh ones */ }
+    else if (b.type !== 1) newBlocks.push({ type: b.type, data: b.data }); // skip PADDING too
+  }
+  newBlocks.push({ type: 4, data: vcBlock });
+  if (picBlock) newBlocks.push({ type: 6, data: picBlock });
+
+  // Serialize
+  const totalMeta = newBlocks.reduce((s, b) => s + 4 + b.data.length, 0);
+  const out = new Uint8Array(4 + totalMeta + audioData.length);
+  out[0]=0x66;out[1]=0x4c;out[2]=0x61;out[3]=0x43; // fLaC
+
+  let off = 4;
+  for (let i = 0; i < newBlocks.length; i++) {
+    const b = newBlocks[i];
+    const isLast = i === newBlocks.length - 1;
+    out[off] = (isLast ? 0x80 : 0x00) | (b.type & 0x7f);
+    out[off+1] = (b.data.length >> 16) & 0xff;
+    out[off+2] = (b.data.length >> 8) & 0xff;
+    out[off+3] = b.data.length & 0xff;
+    out.set(b.data, off+4);
+    off += 4 + b.data.length;
+  }
+  out.set(audioData, off);
+
+  downloadBlob(new Blob([out], { type: 'audio/flac' }), originalFile.name);
+  status.textContent = 'done!';
+}
+
+function encVCString(str) { return new TextEncoder().encode(str); }
+
+function buildVorbisComment() {
+  const vendor = encVCString('audio-tag-editor');
+  const fields = [];
+
+  const add = (key, id) => {
+    const val = document.getElementById(id).value.trim();
+    if (val) fields.push(encVCString(key + '=' + val));
+  };
+  add('TITLE',       'tag-title');
+  add('ARTIST',      'tag-artist');
+  add('ALBUMARTIST', 'tag-album-artist');
+  add('ALBUM',       'tag-album');
+  add('DATE',        'tag-year');
+  add('TRACKNUMBER', 'tag-track');
+  add('DISCNUMBER',  'tag-disc');
+  add('GENRE',       'tag-genre');
+  add('COMPOSER',    'tag-composer');
+  add('COMMENT',     'tag-comment');
+
+  const size = 4 + vendor.length + 4 + fields.reduce((s, f) => s + 4 + f.length, 0);
+  const buf = new Uint8Array(size);
+  let p = 0;
+  // vendor length (LE)
+  buf[p++] = vendor.length & 0xff; buf[p++] = (vendor.length >> 8) & 0xff;
+  buf[p++] = (vendor.length >> 16) & 0xff; buf[p++] = (vendor.length >> 24) & 0xff;
+  buf.set(vendor, p); p += vendor.length;
+  // field count (LE)
+  buf[p++] = fields.length & 0xff; buf[p++] = (fields.length >> 8) & 0xff;
+  buf[p++] = (fields.length >> 16) & 0xff; buf[p++] = (fields.length >> 24) & 0xff;
+  for (const f of fields) {
+    buf[p++] = f.length & 0xff; buf[p++] = (f.length >> 8) & 0xff;
+    buf[p++] = (f.length >> 16) & 0xff; buf[p++] = (f.length >> 24) & 0xff;
+    buf.set(f, p); p += f.length;
+  }
+  return buf;
+}
+
+function buildFlacPicture(imgData, mimeType) {
+  const mime = new TextEncoder().encode(mimeType || 'image/jpeg');
+  const desc = new Uint8Array(0);
+  const size = 4 + 4 + mime.length + 4 + desc.length + 4*4 + 4 + imgData.length;
+  const buf = new Uint8Array(size);
+  let p = 0;
+  const w32 = v => { buf[p++]=(v>>24)&0xff;buf[p++]=(v>>16)&0xff;buf[p++]=(v>>8)&0xff;buf[p++]=v&0xff; };
+  w32(3); // picture type: cover front
+  w32(mime.length); buf.set(mime, p); p += mime.length;
+  w32(desc.length); p += desc.length;
+  w32(0); w32(0); w32(0); w32(0); // width, height, depth, colors
+  w32(imgData.length); buf.set(imgData, p);
+  return buf;
+}
+
+// ── utils ──────────────────────────────────────────────────────────────────
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+}
+</script>
+</body>
+</html>
