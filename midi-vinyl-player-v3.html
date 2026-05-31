@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MIDI Vinyl</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Space+Mono:wght@400;700&display=swap"
+      rel="stylesheet" />
+    <style>
+      /* ============================================================
+   PREFERENCES — edit colors, fonts, sizes here
+   ============================================================ */
+      :root {
+        /* Colors */
+        --bg: #0d1b2e;
+        --panel-bg: #0a1625;
+        --card-idle: #1a3a5c;
+        --card-hover: #2a5a8c;
+        --card-active: #c8a227;
+        --accent-gold: #c8a227;
+        --text-primary: #e8dfc8;
+        --text-secondary: #8a9bb0;
+        --progress-bg: #1a2a3a;
+        --progress-fill: #c8a227;
+        --selector-peek: 64px; /* how much of the selector shows when idle */
+
+        /* Typography */
+        --font-display: "Playfair Display", serif;
+        --font-mono: "Space Mono", monospace;
+
+        /* Disc */
+        --disc-size-main: 480px;
+        --disc-size-card: 48px;
+
+        /* Animation */
+        --spin-speed: 36s; /* 360deg / 10deg/s = 36s */
+        --card-transition: 0.55s;
+        --retract-delay-base: 0.08s;
+      }
+
+      /* ============================================================
+   IMAGE / ASSET CONFIG — set your paths here
+   ============================================================ */
+      /* These are used by JS below; listed here for easy reference:
+   Each track object has:
+     vinylImage: path to MIDI vinyl PNG (1080×1080 recommended, circular on black bg)
+     artImage:   path to art-side PNG (same size) — set null if none
+   Button icons (set in JS PREFS):
+     iconPlay, iconPause, iconStop, iconLoop, iconLoopOff,
+     iconFlipToArt, iconFlipToMidi, iconFlipDisabled,
+     iconVolMute, iconVolLow, iconVolMid, iconVolHigh
+   SFX:
+     sfxClick, sfxHover
+*/
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text-primary);
+        font-family: var(--font-mono);
+        overflow: hidden;
+        user-select: none;
+      }
+
+      /* ── Layout ─────────────────────────────────────────────── */
+      #app {
+        display: flex;
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+      }
+
+      /* ── Selector panel ──────────────────────────────────────── */
+      #selector-scroll {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 320px; /* wider than 280px — gives pointy tips room */
+        z-index: 10;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: none;
+      }
+      #selector-scroll::-webkit-scrollbar {
+        display: none;
+      }
+
+      #selector {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        justify-content: center;
+        min-height: 100%;
+        gap: 6px;
+        padding: 20px 0;
+        pointer-events: none;
+        width: 320px;
+      }
+
+      .track-card {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        left: calc(-280px + var(--selector-peek));
+        width: 280px;
+        padding: 8px 14px 8px 10px;
+        border-radius: 0 6px 6px 0;
+        background: var(--card-idle);
+        cursor: pointer;
+        pointer-events: all;
+        transition:
+          left var(--card-transition) cubic-bezier(0.34, 1.56, 0.64, 1),
+          background var(--card-transition) ease,
+          transform var(--card-transition) cubic-bezier(0.34, 1.56, 0.64, 1),
+          box-shadow var(--card-transition) ease;
+
+        /* pointy right edge via clip-path */
+        clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 0 100%);
+      }
+
+      .track-card::before {
+        /* left accent bar */
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 10%;
+        bottom: 10%;
+        width: 3px;
+        background: var(--card-idle);
+        border-radius: 2px;
+        transition: background var(--card-transition) ease;
+      }
+
+      .track-card.active {
+        background: var(--card-active) !important;
+        color: #1a1000;
+      }
+      .track-card.active::before {
+        background: #7a5c00;
+      }
+      .track-card.active .track-meta {
+        color: #5a3d00;
+      }
+
+      .track-card.hovered-near {
+        background: var(--card-hover);
+      }
+
+      /* disc icon wrapper */
+      .card-disc-wrap {
+        width: var(--disc-size-card);
+        height: var(--disc-size-card);
+        flex-shrink: 0;
+        position: relative;
+        border-radius: 50%;
+        overflow: hidden;
+      }
+
+      .card-disc-front,
+      .card-disc-back {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        overflow: hidden;
+        backface-visibility: hidden;
+        transition: transform 0.7s cubic-bezier(0.77, 0, 0.175, 1);
+      }
+
+      .card-disc-front img,
+      .card-disc-back img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 50%;
+      }
+
+      .card-disc-fallback {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        background: radial-gradient(circle, #2a2a3a 30%, #111 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 22px;
+        color: var(--text-secondary);
+      }
+
+      .card-disc-back {
+        transform: rotateY(180deg);
+        background: radial-gradient(circle, #3a2a0a 30%, #1a1000 100%);
+      }
+
+      .card-disc-wrap.flipped .card-disc-front {
+        transform: rotateY(-180deg);
+      }
+      .card-disc-wrap.flipped .card-disc-back {
+        transform: rotateY(0deg);
+      }
+
+      /* spinning animation on card discs */
+      .card-disc-front img {
+        animation: spin-card 8s linear infinite paused;
+      }
+      .track-card.active .card-disc-front img {
+        animation-play-state: running;
+      }
+      @keyframes spin-card {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .card-text {
+        flex: 1;
+        overflow: hidden;
+      }
+      .card-title {
+        font-family: var(--font-display);
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .track-meta {
+        font-size: 10px;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        margin-top: 2px;
+      }
+
+      /* ── Main player ─────────────────────────────────────────── */
+      #player {
+        margin-left: var(--selector-peek);
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0;
+        padding: 24px 40px;
+        position: relative;
+      }
+
+      /* subtle vignette */
+      #player::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 40%, rgba(0, 0, 0, 0.45) 100%);
+        pointer-events: none;
+      }
+
+      /* ── Main disc ───────────────────────────────────────────── */
+      #main-disc-wrap {
+        width: var(--disc-size-main);
+        height: var(--disc-size-main);
+        position: relative;
+        perspective: 1200px;
+        flex-shrink: 0;
+        margin-bottom: 28px;
+        filter: drop-shadow(0 20px 60px rgba(0, 0, 0, 0.7));
+      }
+
+      /* This is the flip container — ONLY handles the 3D card-flip.
+   It never rotates on Z. transform-style:preserve-3d lets children
+   live in the same 3D space. */
+      #main-disc-inner {
+        width: 100%;
+        height: 100%;
+        position: relative;
+        transform-style: preserve-3d;
+        /* Normal → flipped: rotate around the diagonal axis (135°↔315°).
+     We use a keyframe so it animates through the diagonal and lands cleanly. */
+        transition: transform 1.1s cubic-bezier(0.77, 0, 0.175, 1);
+      }
+
+      #main-disc-inner.flipped {
+        transform: rotate3d(1, -1, 0, 180deg);
+      }
+
+      /* Each face sits at the same spot; back face is pre-rotated 180° on the
+   same diagonal axis so it appears "behind" the front. Neither face
+   has any spin transform — that lives one level deeper in .disc-spinner. */
+      .disc-face {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        overflow: hidden;
+        backface-visibility: hidden;
+        -webkit-backface-visibility: hidden;
+      }
+
+      #disc-back {
+        transform: rotate3d(1, -1, 0, 180deg);
+      }
+
+      /* The spinner is the actual rotating layer — pure Z-axis rotation only.
+   Driven entirely by JS so there's never a CSS↔JS handoff snap. */
+      .disc-spinner {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        overflow: hidden;
+      }
+
+      .disc-spinner img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 50%;
+        display: block;
+      }
+
+      .disc-fallback {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        background: radial-gradient(circle at center, #2a1a00 15%, #1a1a2a 40%, #0d0d1a 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 80px;
+        color: #2a3a50;
+      }
+
+      /* ── Track info ──────────────────────────────────────────── */
+      #track-info {
+        text-align: center;
+        margin-bottom: 16px;
+      }
+
+      #track-title {
+        font-family: var(--font-display);
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        line-height: 1.1;
+      }
+
+      #track-subtitle {
+        font-family: var(--font-display);
+        font-style: italic;
+        font-size: 16px;
+        color: var(--text-secondary);
+        margin-top: 4px;
+      }
+
+      #track-metadata {
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-top: 8px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      /* ── Progress bar ────────────────────────────────────────── */
+      #progress-section {
+        width: 100%;
+        max-width: 540px;
+        margin-bottom: 18px;
+      }
+
+      #time-display {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+      }
+
+      #progress-bar-wrap {
+        width: 100%;
+        height: 4px;
+        background: var(--progress-bg);
+        border-radius: 2px;
+        cursor: pointer;
+        position: relative;
+      }
+
+      #progress-fill {
+        height: 100%;
+        background: var(--accent-gold);
+        border-radius: 2px;
+        width: 0%;
+        pointer-events: none;
+        transition: width 0.25s linear;
+      }
+
+      #progress-thumb {
+        position: absolute;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--accent-gold);
+        left: 0%;
+        pointer-events: none;
+        box-shadow: 0 0 6px var(--accent-gold);
+        transition: left 0.25s linear;
+      }
+
+      /* ── Controls ────────────────────────────────────────────── */
+      #controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .ctrl-btn {
+        width: 44px;
+        height: 44px;
+        border: none;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-primary);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        transition:
+          background 0.2s,
+          transform 0.1s,
+          box-shadow 0.2s;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .ctrl-btn:hover {
+        background: rgba(255, 255, 255, 0.12);
+        transform: scale(1.08);
+      }
+      .ctrl-btn:active {
+        transform: scale(0.95);
+      }
+
+      .ctrl-btn.active {
+        background: rgba(200, 162, 39, 0.2);
+        color: var(--accent-gold);
+        box-shadow: 0 0 12px rgba(200, 162, 39, 0.3);
+      }
+
+      .ctrl-btn.disabled {
+        opacity: 0.3;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+
+      .ctrl-btn img {
+        width: 24px;
+        height: 24px;
+        object-fit: contain;
+      }
+
+      /* play/pause pair */
+      #btn-play {
+        width: 56px;
+        height: 56px;
+        font-size: 22px;
+      }
+      #btn-pause {
+        width: 56px;
+        height: 56px;
+        font-size: 22px;
+        display: none;
+      }
+      #btn-pause.visible {
+        display: flex;
+      }
+      #btn-play.hidden {
+        display: none;
+      }
+
+      /* volume */
+      #volume-wrap {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #volume-icon {
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        color: var(--text-secondary);
+        cursor: pointer;
+      }
+
+      #volume-slider {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 90px;
+        height: 4px;
+        background: var(--progress-bg);
+        border-radius: 2px;
+        outline: none;
+        cursor: pointer;
+      }
+
+      #volume-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--accent-gold);
+        cursor: pointer;
+        box-shadow: 0 0 6px rgba(200, 162, 39, 0.5);
+      }
+
+      /* grain overlay for atmosphere */
+      #grain {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 100;
+        opacity: 0.03;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+        background-size: 256px 256px;
+      }
+
+      /* tooltip-ish label */
+      #now-playing-label {
+        position: absolute;
+        top: 18px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 10px;
+        letter-spacing: 0.25em;
+        text-transform: uppercase;
+        color: var(--text-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="grain"></div>
+
+    <div id="app">
+      <!-- SELECTOR -->
+      <div id="selector-scroll">
+        <div id="selector"></div>
+      </div>
+
+      <!-- MAIN PLAYER -->
+      <div id="player">
+        <!--<div id="now-playing-label">NOW PLAYING</div>-->
+
+        <!-- Main disc -->
+        <div id="main-disc-wrap">
+          <div id="main-disc-inner">
+            <div class="disc-face" id="disc-front">
+              <div class="disc-spinner" id="disc-front-spinner">
+                <div class="disc-fallback" id="disc-front-fallback">◎</div>
+                <img id="disc-front-img" src="" alt="" style="display: none" />
+              </div>
+            </div>
+            <div class="disc-face" id="disc-back">
+              <div class="disc-spinner" id="disc-back-spinner">
+                <div class="disc-fallback" id="disc-back-fallback">✦</div>
+                <img id="disc-back-img" src="" alt="" style="display: none" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Track info -->
+        <div id="track-info">
+          <div id="track-title">— SELECT A TRACK —</div>
+          <div id="track-subtitle"></div>
+          <div id="track-metadata"></div>
+        </div>
+
+        <!-- Progress -->
+        <div id="progress-section">
+          <div id="time-display">
+            <span id="time-current">0:00</span>
+            <span id="time-total">0:00</span>
+          </div>
+          <div id="progress-bar-wrap">
+            <div id="progress-fill"></div>
+            <div id="progress-thumb"></div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div id="controls">
+          <button class="ctrl-btn" id="btn-loop" title="Loop">⟳</button>
+          <button class="ctrl-btn" id="btn-stop" title="Stop">■</button>
+          <button class="ctrl-btn" id="btn-play" title="Play">▶</button>
+          <button class="ctrl-btn" id="btn-pause" title="Pause">⏸</button>
+          <button class="ctrl-btn" id="btn-flip" title="Flip disc">⇄</button>
+          <div id="volume-wrap">
+            <div id="volume-icon">🔊</div>
+            <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.8" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AUDIO ELEMENT -->
+    <audio id="audio"></audio>
+
+    <script>
+      /* ============================================================
+   ██████  ██████  ███████ ███████ ███████
+   ██   ██ ██   ██ ██      ██      ██
+   ██████  ██████  █████   █████   ███████
+   ██      ██   ██ ██      ██           ██
+   ██      ██   ██ ███████ ██      ███████
+   Edit everything in this block freely!
+   ============================================================ */
+      const PREFS = {
+        /* ── SFX paths ────────────────────────── */
+        sfxClick: "audio/sfx/click2.mp3", // e.g. 'sounds/click.mp3'
+        sfxHover: "audio/sfx/click2.mp3", // e.g. 'sounds/hover.mp3'
+        sfxEnabled: true,
+        sfxClickVolume: 0.6, // 0.0 – 1.0
+        sfxHoverVolume: 0.4, // 0.0 – 1.0
+
+        /* ── Button icon paths (null = use text fallback) ── */
+        /* Recommended size: 48×48 px PNG with transparency   */
+        icons: {
+          play: null, // 48×48
+          pause: null, // 48×48
+          stop: null, // 48×48
+          loop: null, // 48×48 — inactive state
+          loopActive: null, // 48×48 — active state
+          flipToArt: null, // 48×48
+          flipToMidi: null, // 48×48
+          flipDisabled: null, // 48×48
+          volMute: null, // 48×48 — 0%
+          volLow: null, // 48×48 — 1–33%
+          volMid: null, // 48×48 — 34–66%
+          volHigh: null // 48×48 — 67–100%
+        },
+
+        /* ── Theme overrides (overrides CSS vars at runtime) ─ */
+        colors: {
+          bg: null, // e.g. '#0d1b2e'
+          cardActive: null, // e.g. '#c8a227'
+          accentGold: null
+        }
+      };
+
+      /* ============================================================
+   TRACK LIST
+   Add / remove tracks here.
+   Fields:
+     title      — displayed large
+     subtitle   — italic below title
+     album      — for metadata string
+     artist     — for metadata string
+     year       — for metadata string
+     audio      — path to MP3 file
+     vinylImage — path to MIDI vinyl PNG (1080×1080 recommended)
+     artImage   — path to art-side PNG (same size), or null
+   ============================================================ */
+      const TRACKS = [
+        {
+          title: "Jellyfish Theme",
+          subtitle: "pink jellyfish",
+          album: "Bossfight Music",
+          artist: "Michael",
+          year: "2026",
+          audio: "audio/jellyfish-theme-fullver.mp3",
+          vinylImage: "images/vinyl/pink-jellyfish-theme.png",
+          artImage: "images/art/water-background-vinyl.png"
+        },
+        {
+          title: "Semblance of a Shiny Bell",
+          subtitle: "sandy boss fight",
+          album: "The Stick Wars - DND Edition",
+          artist: "Michael",
+          year: "2026",
+          audio: "audio/semblance-of-a-shiny-bell.mp3",
+          vinylImage: "images/vinyl/semblance-of-a-shiny-bell.png",
+          artImage: null
+        },
+        {
+          title: "Duelist",
+          subtitle: "the king opposes",
+          album: "The Stick Wars - DND Edition",
+          artist: "Michael",
+          year: "2026",
+          audio: "audio/duelist.mp3",
+          vinylImage: "images/vinyl/duelist-vinyl.png",
+          artImage: null
+        }
+      ];
+
+      /* ============================================================
+   ENGINE — touch with care
+   ============================================================ */
+      const audio = document.getElementById("audio");
+      let currentTrack = -1;
+      let isPlaying = false;
+      let isLooping = false;
+      let isFlipped = false; // main disc art state
+      let spinAngle = 0; // current rotation degrees
+      let spinSpeed = 10; // deg/sec baseline
+      let targetSpeed = 10;
+      let lastTimestamp = null;
+      let animFrame = null;
+      let progressDragging = false;
+
+      /* apply theme overrides */
+      (function applyTheme() {
+        const root = document.documentElement;
+        const c = PREFS.colors;
+        if (c.bg) root.style.setProperty("--bg", c.bg);
+        if (c.cardActive) root.style.setProperty("--card-active", c.cardActive);
+        if (c.accentGold) root.style.setProperty("--accent-gold", c.accentGold);
+      })();
+
+      /* ── SFX ─────────────────────────────────────────────────── */
+      const sfxClick = PREFS.sfxClick && PREFS.sfxEnabled ? new Audio(PREFS.sfxClick) : null;
+      const sfxHover = PREFS.sfxHover && PREFS.sfxEnabled ? new Audio(PREFS.sfxHover) : null;
+      if (sfxClick) sfxClick.volume = PREFS.sfxClickVolume ?? 1.0;
+      if (sfxHover) sfxHover.volume = PREFS.sfxHoverVolume ?? 1.0;
+
+      function playClick() {
+        if (sfxClick) {
+          sfxClick.currentTime = 0;
+          sfxClick.play().catch(() => {});
+        }
+      }
+      function playHover() {
+        if (sfxHover) {
+          sfxHover.currentTime = 0;
+          sfxHover.play().catch(() => {});
+        }
+      }
+
+      /* ── Icon helper ─────────────────────────────────────────── */
+      function iconOrText(path, fallback) {
+        if (path) return `<img src="${path}" alt="">`;
+        return fallback;
+      }
+
+      /* ── Selector build ──────────────────────────────────────── */
+      const selectorEl = document.getElementById("selector");
+
+      function buildSelector() {
+        selectorEl.innerHTML = "";
+        TRACKS.forEach((track, i) => {
+          const card = document.createElement("div");
+          card.className = "track-card";
+          card.dataset.index = i;
+
+          const vinylSrc = track.vinylImage || "";
+          const artSrc = track.artImage || "";
+
+          card.innerHTML = `
+      <div class="card-disc-wrap" id="card-disc-${i}">
+        <div class="card-disc-front">
+          ${vinylSrc ? `<img src="${vinylSrc}" alt="${track.title}">` : `<div class="card-disc-fallback">◎</div>`}
+        </div>
+        <div class="card-disc-back">
+          ${
+            artSrc
+              ? `<img src="${artSrc}" alt="art">`
+              : `<div class="card-disc-fallback" style="font-size:16px">✦</div>`
+          }
+        </div>
+      </div>
+      <div class="card-text">
+        <div class="card-title">${track.title}</div>
+        <div class="track-meta">${track.subtitle || track.album}</div>
+      </div>`;
+
+          card.addEventListener("click", () => {
+            playClick();
+            selectTrack(i);
+          });
+          card.addEventListener("mouseenter", () => {
+            playHover();
+            hoverCard(i);
+          });
+          selectorEl.appendChild(card);
+        });
+      }
+
+      buildSelector();
+
+      /* ── Hover ripple ────────────────────────────────────────── */
+      let hoverIndex = -1;
+      let retractTimer = null;
+
+      function hoverCard(i) {
+        hoverIndex = i;
+        clearTimeout(retractTimer);
+        updateCardPositions(i, false);
+      }
+
+      function leaveSelector() {
+        hoverIndex = -1;
+        /* staggered retract back toward active */
+        retractTimer = setTimeout(() => updateCardPositions(-1, true), 80);
+      }
+
+      selectorEl.addEventListener("mouseleave", leaveSelector);
+
+      function cardExtent(cardIdx, focusIdx, trackCount) {
+        /* returns 0-1 — how far this card extends out */
+        if (focusIdx === -1) {
+          /* retract: active card stays a little extended */
+          if (cardIdx === currentTrack) return 0.28;
+          const dist = Math.abs(cardIdx - currentTrack);
+          return Math.max(0, 0.12 - dist * 0.04);
+        }
+        const dist = Math.abs(cardIdx - focusIdx);
+        if (dist === 0) return 1;
+        if (dist === 1) return 0.62;
+        if (dist === 2) return 0.32;
+        if (dist === 3) return 0.12;
+        return 0;
+      }
+
+      function updateCardPositions(focusIdx, stagger) {
+        const cards = selectorEl.querySelectorAll(".track-card");
+        cards.forEach((card, i) => {
+          const extent = cardExtent(i, focusIdx, TRACKS.length);
+          const leftPx = -(280 - 64) * (1 - extent);
+          const delay = stagger ? Math.abs(i - (currentTrack === -1 ? 0 : currentTrack)) * 40 : 0;
+          card.style.transitionDelay = `${delay}ms`;
+          card.style.left = `${leftPx}px`;
+
+          if (i === focusIdx) {
+            card.style.transform = "scale(1.05)";
+            card.style.background = card.classList.contains("active") ? "var(--card-active)" : "var(--card-hover)";
+          } else {
+            card.style.transform = "scale(1)";
+            if (!card.classList.contains("active")) card.style.background = "var(--card-idle)";
+          }
+        });
+      }
+
+      /* ── Track selection ─────────────────────────────────────── */
+      function selectTrack(i) {
+        if (i === currentTrack) {
+          /* re-selecting same track: just play/resume */
+          if (!isPlaying) startPlay();
+          return;
+        }
+
+        currentTrack = i;
+        const track = TRACKS[i];
+
+        /* update card states */
+        selectorEl.querySelectorAll(".track-card").forEach((c, idx) => {
+          c.classList.toggle("active", idx === i);
+          c.style.background = idx === i ? "" : "var(--card-idle)";
+        });
+
+        /* flip card disc to midi side */
+        document.querySelectorAll(".card-disc-wrap").forEach((w) => w.classList.remove("flipped"));
+
+        /* update main disc images */
+        setMainDisc(track);
+
+        /* update info */
+        document.getElementById("track-title").textContent = track.title;
+        document.getElementById("track-subtitle").textContent = track.subtitle || "";
+        const meta = [track.album, track.artist, track.year].filter(Boolean).join(" • ");
+        document.getElementById("track-metadata").textContent = meta;
+
+        /* flip main disc back to MIDI side if it was on art */
+        if (isFlipped) flipMainDisc(false);
+
+        /* update flip button */
+        updateFlipButton(track);
+
+        /* load audio */
+        if (track.audio) {
+          audio.src = track.audio;
+          audio.load();
+          startPlay();
+        } else {
+          audio.src = "";
+          isPlaying = false;
+          updatePlayPause();
+        }
+
+        /* acceleration burst */
+        targetSpeed = 120;
+        setTimeout(() => {
+          targetSpeed = 10;
+        }, 800);
+        /* always run the loop so acceleration animates even when not playing */
+        if (!animFrame) startSpinLoop();
+
+        updateCardPositions(hoverIndex, false);
+      }
+
+      function setMainDisc(track) {
+        const frontImg = document.getElementById("disc-front-img");
+        const frontFb = document.getElementById("disc-front-fallback");
+        const backImg = document.getElementById("disc-back-img");
+        const backFb = document.getElementById("disc-back-fallback");
+
+        if (track.vinylImage) {
+          frontImg.src = track.vinylImage;
+          frontImg.style.display = "block";
+          frontFb.style.display = "none";
+        } else {
+          frontImg.style.display = "none";
+          frontFb.style.display = "flex";
+        }
+
+        if (track.artImage) {
+          backImg.src = track.artImage;
+          backImg.style.display = "block";
+          backFb.style.display = "none";
+        } else {
+          backImg.style.display = "none";
+          backFb.style.display = "flex";
+        }
+      }
+
+      function updateFlipButton(track) {
+        const btn = document.getElementById("btn-flip");
+        if (!track || !track.artImage) {
+          btn.classList.add("disabled");
+          btn.innerHTML = iconOrText(PREFS.icons.flipDisabled, "⊘");
+          btn.title = "No art available";
+        } else {
+          btn.classList.remove("disabled");
+          btn.innerHTML = isFlipped ? iconOrText(PREFS.icons.flipToMidi, "⊙") : iconOrText(PREFS.icons.flipToArt, "⇄");
+          btn.title = isFlipped ? "Flip to MIDI" : "Flip to art";
+        }
+      }
+
+      /* ── Playback ────────────────────────────────────────────── */
+      function startPlay() {
+        if (!audio.src) return;
+        audio
+          .play()
+          .then(() => {
+            isPlaying = true;
+            updatePlayPause();
+            startSpinLoop();
+            document.getElementById("main-disc-wrap").classList.add("playing");
+          })
+          .catch(() => {});
+      }
+
+      function pausePlay() {
+        audio.pause();
+        isPlaying = false;
+        updatePlayPause();
+        document.getElementById("main-disc-wrap").classList.remove("playing");
+      }
+
+      function stopPlay() {
+        audio.pause();
+        audio.currentTime = 0;
+        isPlaying = false;
+        updatePlayPause();
+        document.getElementById("main-disc-wrap").classList.remove("playing");
+        updateProgress(0, 0);
+      }
+
+      function updatePlayPause() {
+        const play = document.getElementById("btn-play");
+        const pause = document.getElementById("btn-pause");
+        if (isPlaying) {
+          play.style.display = "none";
+          pause.style.display = "flex";
+        } else {
+          play.style.display = "flex";
+          pause.style.display = "none";
+        }
+      }
+
+      /* ── Spin loop ───────────────────────────────────────────── */
+      function startSpinLoop() {
+        if (animFrame) return;
+        lastTimestamp = null;
+        animFrame = requestAnimationFrame(spinLoop);
+      }
+
+      function spinLoop(ts) {
+        if (!lastTimestamp) lastTimestamp = ts;
+        const dt = (ts - lastTimestamp) / 1000;
+        lastTimestamp = ts;
+
+        /* ease spinSpeed toward targetSpeed — always, even when paused (for burst) */
+        spinSpeed += (targetSpeed - spinSpeed) * Math.min(1, dt * 4);
+
+        /* only advance angle when playing OR still decelerating from a burst */
+        if (isPlaying || spinSpeed > 10.5) {
+          spinAngle = (spinAngle + spinSpeed * dt) % 360;
+        }
+
+        /* always write directly — no CSS animation involved, so no snap ever */
+        const frontSpinner = document.getElementById("disc-front-spinner");
+        const backSpinner = document.getElementById("disc-back-spinner");
+        if (frontSpinner) frontSpinner.style.transform = `rotate(${spinAngle}deg)`;
+        if (backSpinner) backSpinner.style.transform = `rotate(${spinAngle}deg)`;
+
+        animFrame = requestAnimationFrame(spinLoop);
+      }
+
+      /* ── Progress ────────────────────────────────────────────── */
+      function formatTime(s) {
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return `${m}:${sec.toString().padStart(2, "0")}`;
+      }
+
+      function updateProgress(current, duration) {
+        const pct = duration > 0 ? (current / duration) * 100 : 0;
+        document.getElementById("progress-fill").style.width = pct + "%";
+        document.getElementById("progress-thumb").style.left = pct + "%";
+        document.getElementById("time-current").textContent = formatTime(current);
+        document.getElementById("time-total").textContent = formatTime(duration || 0);
+      }
+
+      audio.addEventListener("timeupdate", () => {
+        if (!progressDragging) updateProgress(audio.currentTime, audio.duration);
+      });
+
+      audio.addEventListener("ended", () => {
+        if (isLooping) {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        } else {
+          stopPlay();
+        }
+      });
+
+      /* progress bar scrubbing */
+      const progressWrap = document.getElementById("progress-bar-wrap");
+      progressWrap.addEventListener("mousedown", (e) => {
+        progressDragging = true;
+        scrub(e);
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (progressDragging) scrub(e);
+      });
+      document.addEventListener("mouseup", () => {
+        progressDragging = false;
+      });
+
+      function scrub(e) {
+        const rect = progressWrap.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        updateProgress(pct * (audio.duration || 0), audio.duration || 0);
+        if (audio.duration) audio.currentTime = pct * audio.duration;
+      }
+
+      /* ── Flip main disc ──────────────────────────────────────── */
+      function flipMainDisc(toArt) {
+        isFlipped = toArt === undefined ? !isFlipped : toArt;
+        const inner = document.getElementById("main-disc-inner");
+        inner.classList.toggle("flipped", isFlipped);
+
+        /* also flip corresponding card disc */
+        const wrap = document.getElementById(`card-disc-${currentTrack}`);
+        if (wrap) wrap.classList.toggle("flipped", isFlipped);
+
+        if (currentTrack >= 0) updateFlipButton(TRACKS[currentTrack]);
+      }
+
+      /* ── Volume ──────────────────────────────────────────────── */
+      const volSlider = document.getElementById("volume-slider");
+      const volIcon = document.getElementById("volume-icon");
+
+      function updateVolIcon(v) {
+        const icons = PREFS.icons;
+        if (v === 0) volIcon.innerHTML = iconOrText(icons.volMute, "🔇");
+        else if (v < 0.34) volIcon.innerHTML = iconOrText(icons.volLow, "🔈");
+        else if (v < 0.67) volIcon.innerHTML = iconOrText(icons.volMid, "🔉");
+        else volIcon.innerHTML = iconOrText(icons.volHigh, "🔊");
+      }
+
+      volSlider.addEventListener("input", () => {
+        audio.volume = volSlider.value;
+        updateVolIcon(parseFloat(volSlider.value));
+      });
+
+      volIcon.addEventListener("click", () => {
+        playClick();
+        if (audio.volume > 0) {
+          volSlider._prev = audio.volume;
+          audio.volume = 0;
+          volSlider.value = 0;
+        } else {
+          audio.volume = volSlider._prev || 0.8;
+          volSlider.value = audio.volume;
+        }
+        updateVolIcon(audio.volume);
+      });
+
+      audio.volume = 0.8;
+      updateVolIcon(0.8);
+
+      /* ── Button wiring ───────────────────────────────────────── */
+      document.getElementById("btn-play").addEventListener("click", () => {
+        playClick();
+        if (currentTrack === -1 && TRACKS.length > 0) selectTrack(0);
+        else startPlay();
+      });
+
+      document.getElementById("btn-pause").addEventListener("click", () => {
+        playClick();
+        pausePlay();
+      });
+
+      document.getElementById("btn-stop").addEventListener("click", () => {
+        playClick();
+        stopPlay();
+      });
+
+      document.getElementById("btn-loop").addEventListener("click", () => {
+        playClick();
+        isLooping = !isLooping;
+        const btn = document.getElementById("btn-loop");
+        btn.classList.toggle("active", isLooping);
+        btn.innerHTML = iconOrText(isLooping ? PREFS.icons.loopActive : PREFS.icons.loop, "⟳");
+      });
+
+      document.getElementById("btn-flip").addEventListener("click", () => {
+        playClick();
+        if (currentTrack >= 0 && TRACKS[currentTrack].artImage) flipMainDisc();
+      });
+
+      /* ── Init ────────────────────────────────────────────────── */
+      updateCardPositions(-1, false);
+      startSpinLoop(); /* run always so acceleration bursts work from the start */
+    </script>
+  </body>
+</html>
